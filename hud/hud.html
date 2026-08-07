@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        user-select: none;
+    }
+
+    #container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        gap: 18px;
+    }
+
+    #orb-wrap {
+        position: relative;
+        width: 140px;
+        height: 140px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    #orb {
+        width: 90px;
+        height: 90px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, #7fd4ff, #0a84ff 60%, #0050b3 100%);
+        box-shadow:
+            0 0 20px 4px rgba(10, 132, 255, 0.55),
+            0 0 50px 12px rgba(10, 132, 255, 0.25);
+        transition: box-shadow 0.4s ease, background 0.4s ease, transform 0.4s ease;
+    }
+
+    #ring {
+        position: absolute;
+        width: 140px;
+        height: 140px;
+        border-radius: 50%;
+        border: 2px solid rgba(10, 132, 255, 0.35);
+        animation: spin 6s linear infinite;
+    }
+
+    @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    /* --- State: idle (slow gentle breathing) --- */
+    body.idle #orb {
+        animation: breathe 3.2s ease-in-out infinite;
+    }
+    @keyframes breathe {
+        0%, 100% { transform: scale(1); opacity: 0.75; }
+        50% { transform: scale(1.05); opacity: 1; }
+    }
+
+    /* --- State: listening (brighter, faster pulse, cyan) --- */
+    body.listening #orb {
+        background: radial-gradient(circle at 35% 30%, #a9ffe8, #00e0c6 60%, #00997f 100%);
+        box-shadow:
+            0 0 30px 8px rgba(0, 224, 198, 0.7),
+            0 0 70px 18px rgba(0, 224, 198, 0.35);
+        animation: pulse-fast 1s ease-in-out infinite;
+    }
+    body.listening #ring {
+        border-color: rgba(0, 224, 198, 0.5);
+        animation: spin 2s linear infinite;
+    }
+    @keyframes pulse-fast {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.12); }
+    }
+
+    /* --- State: thinking (amber, steady rotation, no pulse) --- */
+    body.thinking #orb {
+        background: radial-gradient(circle at 35% 30%, #ffe9a8, #ffb400 60%, #b37800 100%);
+        box-shadow:
+            0 0 25px 6px rgba(255, 180, 0, 0.6),
+            0 0 55px 14px rgba(255, 180, 0, 0.3);
+        animation: think-wobble 1.4s ease-in-out infinite;
+    }
+    body.thinking #ring {
+        border-color: rgba(255, 180, 0, 0.5);
+        animation: spin 1s linear infinite;
+    }
+    @keyframes think-wobble {
+        0%, 100% { transform: scale(1) rotate(0deg); }
+        50% { transform: scale(1.03) rotate(8deg); }
+    }
+
+    /* --- State: speaking (violet/pink, energetic pulse) --- */
+    body.speaking #orb {
+        background: radial-gradient(circle at 35% 30%, #f3b8ff, #b23cff 60%, #6a00b3 100%);
+        box-shadow:
+            0 0 35px 10px rgba(178, 60, 255, 0.7),
+            0 0 80px 22px rgba(178, 60, 255, 0.35);
+        animation: pulse-speak 0.5s ease-in-out infinite;
+    }
+    body.speaking #ring {
+        border-color: rgba(178, 60, 255, 0.5);
+        animation: spin 1.5s linear infinite reverse;
+    }
+    @keyframes pulse-speak {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.16); }
+    }
+
+    #status-text {
+        color: rgba(255, 255, 255, 0.85);
+        font-size: 12px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        text-shadow: 0 0 8px rgba(0,0,0,0.6);
+    }
+
+    #transcript {
+        max-width: 260px;
+        text-align: center;
+        color: rgba(255, 255, 255, 0.9);
+        font-size: 13px;
+        line-height: 1.4;
+        text-shadow: 0 0 6px rgba(0,0,0,0.8);
+        min-height: 18px;
+        padding: 0 12px;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        /* Clamp to 4 lines max, show ellipsis if it overflows beyond that */
+        display: -webkit-box;
+        -webkit-line-clamp: 4;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+</style>
+</head>
+<body class="idle">
+    <div id="container">
+        <div id="orb-wrap">
+            <div id="ring"></div>
+            <div id="orb"></div>
+        </div>
+        <div id="status-text">idle</div>
+        <div id="transcript"></div>
+    </div>
+
+<script>
+const POLL_URL = "http://127.0.0.1:8765/state";
+const PREFS_URL = "http://127.0.0.1:8765/prefs";
+const POLL_INTERVAL_MS = 300;
+
+let lastState = null;
+let showTranscript = true;
+
+async function pollPrefs() {
+    try {
+        const res = await fetch(PREFS_URL, { cache: "no-store" });
+        const prefs = await res.json();
+        showTranscript = prefs.show_transcript !== false;
+    } catch (e) {
+        // keep last known value if the server isn't reachable
+    }
+}
+
+async function poll() {
+    try {
+        const res = await fetch(POLL_URL, { cache: "no-store" });
+        const data = await res.json();
+        applyState(data);
+    } catch (e) {
+        // ARIA process not running / server not up yet - just show idle quietly
+        applyState({ state: "idle", heard: "", reply: "" });
+    }
+    setTimeout(poll, POLL_INTERVAL_MS);
+}
+
+function applyState(data) {
+    const body = document.body;
+    if (data.state !== lastState) {
+        body.className = data.state;
+        document.getElementById("status-text").textContent = data.state;
+        lastState = data.state;
+    }
+
+    const transcriptEl = document.getElementById("transcript");
+
+    if (!showTranscript) {
+        transcriptEl.style.display = "none";
+        return;
+    }
+    transcriptEl.style.display = "-webkit-box";
+
+    let displayText = "";
+    if (data.state === "speaking" && data.reply) {
+        displayText = data.reply;
+    } else if (data.heard) {
+        displayText = data.heard;
+    }
+    transcriptEl.textContent = displayText;
+
+    // Shrink font a bit for longer text so more fits before clamping kicks in
+    if (displayText.length > 140) {
+        transcriptEl.style.fontSize = "11px";
+    } else if (displayText.length > 80) {
+        transcriptEl.style.fontSize = "12px";
+    } else {
+        transcriptEl.style.fontSize = "13px";
+    }
+}
+
+poll();
+pollPrefs();
+setInterval(pollPrefs, 1000);
+</script>
+</body>
+</html>

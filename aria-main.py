@@ -8,8 +8,11 @@ since openWakeWord has no pretrained "ARIA" model and training a custom
 one is a bigger separate project.
 """
 import difflib
+import json
 import os
 import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 PIPER_BINARY = os.path.join(os.path.dirname(sys.executable), "piper")
 import re
@@ -70,6 +73,58 @@ PIPER_VOICE_MODEL = os.path.join(SCRIPT_DIR, "piper_voices", "en_US-lessac-mediu
 # Common ways Whisper might mishear "ARIA" - add more here if you notice new ones
 WAKE_WORD_VARIANTS = ["aria", "area", "are ya", "ares", "arya", "asia", "ari", "ariah", "arriya"]
 WAKE_WORD_MATCH_THRESHOLD = 0.7  # 0-1, similarity ratio required to count as a match
+
+# ---- HUD state broadcasting ----
+# A tiny local HTTP server that serves ARIA's current state as JSON, so a
+# separate HUD window (hud.py) can poll it and show live status/transcript
+# without being coupled to the voice pipeline itself.
+HUD_SERVER_PORT = 8765
+
+_hud_state = {
+    "state": "idle",        # idle | listening | thinking | speaking
+    "heard": "",
+    "reply": "",
+    "timestamp": time.time(),
+}
+_hud_state_lock = threading.Lock()
+
+
+def set_hud_state(**kwargs):
+    with _hud_state_lock:
+        _hud_state.update(kwargs)
+        _hud_state["timestamp"] = time.time()
+
+
+def reset_hud_idle():
+    """Goes back to idle and clears any leftover transcript/reply text."""
+    set_hud_state(state="idle", heard="", reply="")
+
+
+class _HudStateHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/state":
+            self.send_response(404)
+            self.end_headers()
+            return
+        with _hud_state_lock:
+            body = json.dumps(_hud_state).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")  # HUD window fetches cross-origin
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass  # silence default request logging, it's noisy
+
+
+def start_hud_server():
+    server = HTTPServer(("127.0.0.1", HUD_SERVER_PORT), _HudStateHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[HUD state server running on http://127.0.0.1:{HUD_SERVER_PORT}/state]")
+
 
 SYSTEM_PROMPT = (
     "You are ARIA (short for Adaptive & Responsive Intelligence Agent), a voice assistant. "
@@ -143,6 +198,8 @@ def rms_energy(audio_chunk):
 
 def record_with_vad() -> bool:
     """Records until silence is detected. Returns True if speech was captured."""
+    import collections
+
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
     frames = []
     silence_count = 0
@@ -155,16 +212,30 @@ def record_with_vad() -> bool:
                              blocksize=FRAME_SIZE, device=MIC_DEVICE_INDEX)
     stream.start()
 
-    for _ in range(WARMUP_FRAMES):
-        stream.read(FRAME_SIZE)
+    # Instead of blindly discarding the first WARMUP_FRAMES (which used to eat
+    # the start of words like "hey ARIA" if you spoke immediately), we keep a
+    # rolling buffer of that audio. We just don't use those frames to decide
+    # whether speech has started (dodges the stream-startup click artifact),
+    # but the actual audio is preserved and gets included once real speech
+    # is confirmed shortly after.
+    prebuffer = collections.deque(maxlen=WARMUP_FRAMES)
+    frame_count = 0
 
     speech_run = 0
     pending_frames = []
 
     for _ in range(max_frames):
         audio_chunk, _ = stream.read(FRAME_SIZE)
-        frame_bytes = audio_chunk.tobytes()
+        frame_count += 1
 
+        if frame_count <= WARMUP_FRAMES:
+            # Still in the warmup window - store audio but don't evaluate
+            # VAD/energy on it yet, since this window can contain a click
+            # artifact from the stream just starting.
+            prebuffer.append(audio_chunk.copy())
+            continue
+
+        frame_bytes = audio_chunk.tobytes()
         vad_says_speech = vad.is_speech(frame_bytes, MIC_SAMPLE_RATE)
         energy = rms_energy(audio_chunk)
         is_speech = vad_says_speech and energy > ENERGY_THRESHOLD
@@ -175,7 +246,11 @@ def record_with_vad() -> bool:
                 pending_frames.append(audio_chunk.copy())
                 if speech_run >= TRIGGER_FRAMES_THRESHOLD:
                     print("[speech detected, recording...]")
+                    set_hud_state(state="listening")
                     triggered = True
+                    # Prepend the pre-buffered audio too, in case the word
+                    # actually started during the warmup window.
+                    frames.extend(prebuffer)
                     frames.extend(pending_frames)
                     pending_frames = []
             else:
@@ -259,56 +334,48 @@ def clean_for_speech(text: str) -> str:
 
 def speak(text: str):
     text = clean_for_speech(text)
+    # Piper synthesis happens here first - the HUD should still show
+    # "thinking" during this, not "speaking", since no sound is out yet.
     subprocess.run(
         [PIPER_BINARY, "--model", PIPER_VOICE_MODEL, "--output_file", TTS_FILE],
         input=text.encode("utf-8"),
         check=True,
     )
     data, sr = sf.read(TTS_FILE)
+    # Only now, right as audio actually starts playing, switch the HUD to speaking.
+    set_hud_state(state="speaking")
     sd.play(data, sr)
     sd.wait()
 
 
-def notify(title: str, message: str, urgency: str = "normal"):
-    """
-    Shows a desktop notification popup so you have live visual feedback of
-    what ARIA heard, without needing to keep a terminal/journalctl open.
-    Fails silently if notify-send isn't available or no display is attached,
-    so it never breaks the actual voice pipeline.
-    """
-    try:
-        subprocess.run(
-            ["notify-send", "-u", urgency, "-a", "ARIA", title, message],
-            timeout=2,
-            check=False,
-        )
-    except Exception:
-        pass  # notifications are a nice-to-have, never let this crash the loop
-
-
 def run_turn():
+    reset_hud_idle()
     t0 = time.time()
     got_speech = record_with_vad()
 
     if not got_speech:
         print("(Heard nothing, listening again.)")
+        reset_hud_idle()
         return
 
+    set_hud_state(state="thinking")
     t1 = time.time()
     user_text = transcribe_audio()
     print(f"Heard: \"{user_text}\"  ({time.time() - t1:.2f}s)")
 
     if not user_text.strip():
         print("(Transcription empty, listening again.)")
+        reset_hud_idle()
         return
 
-    # Always show what was heard, even if it's not for ARIA - this is the
-    # main "am I even being picked up correctly" feedback loop.
-    notify("ARIA heard", user_text)
+    # Always broadcast what was heard to the HUD, even if it's not for ARIA -
+    # this is the main "am I even being picked up correctly" feedback loop.
+    set_hud_state(heard=user_text)
 
     wake_idx = find_wake_word_index(user_text)
     if wake_idx is None:
         print("(No wake word detected, ignoring.)")
+        reset_hud_idle()
         return
 
     words = user_text.strip().split()
@@ -316,6 +383,7 @@ def run_turn():
 
     if not command_text:
         print("(Heard only the wake word, nothing to act on. Listening again.)")
+        reset_hud_idle()
         return
 
     print(f"Command: \"{command_text}\"")
@@ -323,15 +391,17 @@ def run_turn():
     t2 = time.time()
     reply = ask_llm(command_text)
     print(f"ARIA: \"{reply}\"  ({time.time() - t2:.2f}s)")
-    notify("ARIA replied", reply)
+    set_hud_state(reply=reply)  # text ready to show; state flips to "speaking" once audio actually starts
 
     t3 = time.time()
     speak(reply)
     print(f"(spoke in {time.time() - t3:.2f}s, total turn: {time.time() - t0:.2f}s)")
+    reset_hud_idle()
 
 
 if __name__ == "__main__":
     print("ARIA is ready. Say \"ARIA\" followed by your request. Ctrl+C to quit.")
+    start_hud_server()
     try:
         while True:
             run_turn()
