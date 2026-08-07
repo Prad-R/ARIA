@@ -49,7 +49,7 @@ MAX_RECORD_SECONDS = 15
 
 # ---- Model config ----
 WHISPER_MODEL_SIZE = "base"
-OLLAMA_MODEL = "qwen3:4b"
+OLLAMA_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 OLLAMA_NUM_CTX = 8192  # Ollama defaults to 2048 regardless of model's real max
 
 # Qwen3 (and other hybrid-reasoning models) generate hidden "thinking" tokens
