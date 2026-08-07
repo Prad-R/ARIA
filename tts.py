@@ -6,12 +6,13 @@ then synthesizes and plays the audio.
 """
 import re
 import subprocess
+import time
 
 import soundfile as sf
 import sounddevice as sd
 
 import config
-from hud_bridge import set_hud_state
+from hud_bridge import set_hud_state, should_stop_speaking, clear_stop_speaking
 
 
 def clean_for_speech(text: str) -> str:
@@ -45,7 +46,23 @@ def speak(text: str):
         check=True,
     )
     data, sr = sf.read(config.TTS_FILE)
+
+    # Clear any stale interrupt signal from before this turn started, so an
+    # old click doesn't immediately cut off a fresh reply.
+    clear_stop_speaking()
+
     # Only now, right as audio actually starts playing, switch the HUD to speaking.
     set_hud_state(state="speaking")
     sd.play(data, sr)
-    sd.wait()
+
+    # Poll instead of a blocking sd.wait(), so a "stop speaking" request
+    # (from the tray icon) can interrupt playback immediately rather than
+    # having to wait for the whole reply to finish.
+    stream = sd.get_stream()
+    while stream is not None and stream.active:
+        if should_stop_speaking():
+            print("[speech interrupted]")
+            sd.stop()
+            clear_stop_speaking()
+            break
+        time.sleep(0.1)

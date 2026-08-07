@@ -15,6 +15,7 @@ import sys
 import urllib.request
 
 HUD_PREFS_URL = "http://127.0.0.1:8765/prefs"
+HUD_INTERRUPT_URL = "http://127.0.0.1:8765/interrupt"
 
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QActionGroup
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QCursor
@@ -89,6 +90,15 @@ def set_pref(key: str, value: bool):
         pass  # ARIA not running yet, or server not up - fail silently
 
 
+def trigger_interrupt():
+    """Sends a one-shot 'stop speaking now' signal - not a toggle/pref."""
+    try:
+        req = urllib.request.Request(HUD_INTERRUPT_URL, data=b"", method="POST")
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass  # ARIA not running or not currently speaking - fine either way
+
+
 def make_tray_icon():
     """Simple glowing blue dot, matching the ARIA HUD's theme."""
     size = 64
@@ -139,6 +149,15 @@ class DeviceSwitcherTray:
         current_sink = get_default_sink_name()
         current_source = get_default_source_name()
         prefs = get_prefs()
+
+        # Placed first, not buried under submenus, since this is meant to be
+        # used in a "make it stop right now" moment - false wake-word
+        # triggers or an unwanted reply mid-speech.
+        stop_action = QAction("Stop Speaking", self.menu)
+        stop_action.triggered.connect(lambda: trigger_interrupt())
+        self.menu.addAction(stop_action)
+
+        self.menu.addSeparator()
 
         output_menu = self.menu.addMenu("Output Device")
         output_group = QActionGroup(output_menu)

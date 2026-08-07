@@ -33,6 +33,11 @@ _hud_prefs = {
 }
 _hud_prefs_lock = threading.Lock()
 
+# One-shot "stop speaking now" signal, separate from prefs since it's a
+# momentary action, not a persistent toggle. speak() polls this during
+# playback and stops immediately if set, then clears it.
+_stop_speaking_event = threading.Event()
+
 
 def set_hud_state(**kwargs):
     with _hud_state_lock:
@@ -65,6 +70,19 @@ def is_free_listening() -> bool:
         return _hud_prefs["free_listening"]
 
 
+def request_stop_speaking():
+    """Called by the tray icon (or anything else) to interrupt playback immediately."""
+    _stop_speaking_event.set()
+
+
+def should_stop_speaking() -> bool:
+    return _stop_speaking_event.is_set()
+
+
+def clear_stop_speaking():
+    _stop_speaking_event.clear()
+
+
 class _HudStateHandler(BaseHTTPRequestHandler):
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -86,20 +104,23 @@ class _HudStateHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path != "/prefs":
+        if self.path == "/prefs":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                updates = json.loads(body) if body else {}
+                # Only accept known preference keys, ignore anything unexpected.
+                valid_updates = {k: v for k, v in updates.items() if k in _hud_prefs}
+                set_prefs(**valid_updates)
+                self._send_json(get_prefs())
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=400)
+        elif self.path == "/interrupt":
+            request_stop_speaking()
+            self._send_json({"ok": True})
+        else:
             self.send_response(404)
             self.end_headers()
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            updates = json.loads(body) if body else {}
-            # Only accept known preference keys, ignore anything unexpected.
-            valid_updates = {k: v for k, v in updates.items() if k in _hud_prefs}
-            set_prefs(**valid_updates)
-            self._send_json(get_prefs())
-        except Exception as e:
-            self._send_json({"error": str(e)}, status=400)
 
     def log_message(self, format, *args):
         pass  # silence default request logging, it's noisy
