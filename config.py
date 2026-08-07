@@ -49,8 +49,15 @@ MAX_RECORD_SECONDS = 15
 
 # ---- Model config ----
 WHISPER_MODEL_SIZE = "base"
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL = "qwen3:4b"
 OLLAMA_NUM_CTX = 8192  # Ollama defaults to 2048 regardless of model's real max
+
+# Qwen3 (and other hybrid-reasoning models) generate hidden "thinking" tokens
+# before their actual answer, which costs real latency even though you never
+# see them. For a real-time voice assistant, speed matters more than the
+# extra deliberation, so this is off by default. Flip to True to compare -
+# thinking mode may improve tool-call accuracy at the cost of response time.
+OLLAMA_THINK = False
 
 # Cap how many user/assistant turn-pairs we keep, so context sent to the LLM
 # (and thus latency) doesn't grow unbounded over a long-running service.

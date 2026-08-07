@@ -7,6 +7,8 @@ Supports tool calling: the model can request a web search when it needs
 current information rather than guessing. See tools.py for the actual
 tool definitions and implementations.
 """
+import re
+
 import ollama
 
 import config
@@ -17,6 +19,20 @@ conversation_history = [{"role": "system", "content": config.SYSTEM_PROMPT}]
 # Safety cap: if the model somehow keeps requesting tools in a loop,
 # stop forcing a final answer after this many rounds rather than hanging.
 MAX_TOOL_ROUNDS = 3
+
+
+def strip_thinking(text: str) -> str:
+    """
+    Safety net: some models (like Qwen3) can leak raw <think>...</think>
+    reasoning into the visible reply if think=False isn't respected by the
+    installed Ollama version. This strips it defensively so a misconfigured
+    setup never speaks the raw reasoning out loud - it doesn't fix the
+    latency cost of that reasoning happening, only prevents it being spoken.
+    """
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Handle an unclosed tag too, in case generation got cut off mid-thought.
+    cleaned = re.sub(r"<think>.*", "", cleaned, flags=re.DOTALL)
+    return cleaned.strip()
 
 
 def trim_history():
@@ -38,6 +54,7 @@ def ask_llm(user_text: str) -> str:
             model=config.OLLAMA_MODEL,
             messages=conversation_history,
             tools=TOOLS,
+            think=config.OLLAMA_THINK,
             options={"num_ctx": config.OLLAMA_NUM_CTX},
         )
         message = response["message"]
@@ -45,7 +62,7 @@ def ask_llm(user_text: str) -> str:
 
         if not tool_calls:
             # No tool needed (or no more needed) - this is the final answer.
-            reply = message["content"]
+            reply = strip_thinking(message["content"])
             conversation_history.append({"role": "assistant", "content": reply})
             trim_history()
             return reply
@@ -78,9 +95,10 @@ def ask_llm(user_text: str) -> str:
     response = ollama.chat(
         model=config.OLLAMA_MODEL,
         messages=conversation_history,
+        think=config.OLLAMA_THINK,
         options={"num_ctx": config.OLLAMA_NUM_CTX},
     )
-    reply = response["message"]["content"]
+    reply = strip_thinking(response["message"]["content"])
     conversation_history.append({"role": "assistant", "content": reply})
     trim_history()
     return reply
