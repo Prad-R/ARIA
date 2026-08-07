@@ -39,4 +39,4 @@ fi
 
 echo "[launch-device-switcher] Using DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"
 
-exec /home/prad/miniconda3/envs/aria/bin/python /home/prad/Desktop/Extra/aria/hud/device-switcher.py
+exec /home/prad/miniconda3/envs/aria/bin/python /home/prad/Desktop/Extra/aria/hud/device_switcher.py

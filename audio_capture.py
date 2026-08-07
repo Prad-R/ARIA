@@ -12,7 +12,7 @@ import soundfile as sf
 import webrtcvad
 
 import config
-from hud_bridge import set_hud_state
+from hud_bridge import set_hud_state, is_muted
 
 
 def rms_energy(audio_chunk):
@@ -47,6 +47,15 @@ def record_with_vad() -> bool:
     pending_frames = []
 
     for _ in range(max_frames):
+        # Check mute on every frame (not just once at the start of the turn)
+        # so toggling it takes effect within ~30ms, not only after the
+        # current up-to-15-second listening window finishes.
+        if is_muted():
+            print("[muted mid-recording, aborting]")
+            stream.stop()
+            stream.close()
+            return False
+
         audio_chunk, _ = stream.read(config.FRAME_SIZE)
         frame_count += 1
 

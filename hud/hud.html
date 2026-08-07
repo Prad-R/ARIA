@@ -117,6 +117,23 @@
         50% { transform: scale(1.16); }
     }
 
+    /* --- State: muted (dim red, slow inert pulse - no ring spin, feels "off") --- */
+    body.muted #orb {
+        background: radial-gradient(circle at 35% 30%, #ff9d9d, #e02020 60%, #7a0000 100%);
+        box-shadow:
+            0 0 18px 4px rgba(224, 32, 32, 0.5),
+            0 0 40px 10px rgba(224, 32, 32, 0.22);
+        animation: muted-breathe 3.5s ease-in-out infinite;
+    }
+    body.muted #ring {
+        border-color: rgba(224, 32, 32, 0.3);
+        animation: none;  /* ring stays still - reinforces "not actively working" */
+    }
+    @keyframes muted-breathe {
+        0%, 100% { transform: scale(1); opacity: 0.55; }
+        50% { transform: scale(1.02); opacity: 0.75; }
+    }
+
     #status-text {
         color: rgba(255, 255, 255, 0.85);
         font-size: 12px;

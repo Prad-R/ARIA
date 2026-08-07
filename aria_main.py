@@ -10,7 +10,7 @@ Individual pieces live in their own modules:
   wake_word.py       - fuzzy "ARIA" matching
   llm.py             - Ollama chat + conversation history
   tts.py             - Piper synthesis + playback
-  hud_bridge.py      - HUD state broadcasting server
+  hud_bridge.py      - HUD state broadcasting + shared prefs server
 """
 import time
 
@@ -19,10 +19,23 @@ from transcription import transcribe_audio
 from wake_word import find_wake_word_index
 from llm import ask_llm
 from tts import speak
-from hud_bridge import set_hud_state, reset_hud_idle, start_hud_server
+from hud_bridge import (
+    set_hud_state,
+    reset_hud_idle,
+    start_hud_server,
+    is_muted,
+    is_free_listening,
+)
 
 
 def run_turn():
+    if is_muted():
+        # Muted: don't touch the mic at all. Just idle-wait and re-check
+        # next loop, so nothing is captured or processed while muted.
+        set_hud_state(state="muted")
+        time.sleep(0.3)
+        return
+
     reset_hud_idle()
     t0 = time.time()
     got_speech = record_with_vad()
@@ -46,19 +59,24 @@ def run_turn():
     # "am I even being picked up correctly" feedback loop.
     set_hud_state(heard=user_text)
 
-    wake_idx = find_wake_word_index(user_text)
-    if wake_idx is None:
-        print("(No wake word detected, ignoring.)")
-        reset_hud_idle()
-        return
+    if is_free_listening():
+        # No wake word needed - treat the whole utterance as the command.
+        command_text = user_text.strip()
+        print("[free listening: no wake word required]")
+    else:
+        wake_idx = find_wake_word_index(user_text)
+        if wake_idx is None:
+            print("(No wake word detected, ignoring.)")
+            reset_hud_idle()
+            return
 
-    words = user_text.strip().split()
-    command_text = " ".join(words[wake_idx + 1:]).strip()
+        words = user_text.strip().split()
+        command_text = " ".join(words[wake_idx + 1:]).strip()
 
-    if not command_text:
-        print("(Heard only the wake word, nothing to act on. Listening again.)")
-        reset_hud_idle()
-        return
+        if not command_text:
+            print("(Heard only the wake word, nothing to act on. Listening again.)")
+            reset_hud_idle()
+            return
 
     print(f"Command: \"{command_text}\"")
 

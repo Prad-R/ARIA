@@ -2,6 +2,8 @@
 ARIA Device Switcher - a system tray icon for quickly switching audio
 input/output devices, instead of relying on PulseAudio/PipeWire's
 auto-switch-on-connect behavior (which is inconsistent across setups).
+Also exposes quick toggles for muting ARIA and enabling free listening
+(no wake word required), both controlled via ARIA's shared prefs server.
 
 Uses PyQt5's native QSystemTrayIcon instead of pystray, since pystray's
 default backend requires GTK, which isn't available in this environment
@@ -66,18 +68,19 @@ def set_default_source(name):
     subprocess.run(["pactl", "set-default-source", name], check=False)
 
 
-def get_show_transcript():
+def get_prefs() -> dict:
+    """Fetches all ARIA prefs at once (mute, free_listening, show_transcript)."""
     try:
         with urllib.request.urlopen(HUD_PREFS_URL, timeout=2) as response:
-            data = json.loads(response.read())
-            return data.get("show_transcript", True)
+            return json.loads(response.read())
     except Exception:
-        return True  # default to showing it if ARIA isn't reachable yet
+        # ARIA not reachable yet - safe defaults (nothing muted/forced on).
+        return {"mute": False, "free_listening": False, "show_transcript": True}
 
 
-def set_show_transcript(value: bool):
+def set_pref(key: str, value: bool):
     try:
-        payload = json.dumps({"show_transcript": value}).encode("utf-8")
+        payload = json.dumps({key: value}).encode("utf-8")
         req = urllib.request.Request(
             HUD_PREFS_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST"
         )
@@ -135,6 +138,7 @@ class DeviceSwitcherTray:
 
         current_sink = get_default_sink_name()
         current_source = get_default_source_name()
+        prefs = get_prefs()
 
         output_menu = self.menu.addMenu("Output Device")
         output_group = QActionGroup(output_menu)
@@ -158,9 +162,25 @@ class DeviceSwitcherTray:
 
         self.menu.addSeparator()
 
+        # Mute: stops ARIA capturing audio entirely, so you can talk freely
+        # nearby without accidentally triggering it.
+        mute_action = QAction("Mute ARIA", self.menu, checkable=True)
+        mute_action.setChecked(prefs.get("mute", False))
+        mute_action.triggered.connect(lambda checked: set_pref("mute", checked))
+        self.menu.addAction(mute_action)
+
+        # Free listening: skips the wake-word requirement, every utterance
+        # heard is treated as a direct command.
+        free_listening_action = QAction("Free Listening", self.menu, checkable=True)
+        free_listening_action.setChecked(prefs.get("free_listening", False))
+        free_listening_action.triggered.connect(lambda checked: set_pref("free_listening", checked))
+        self.menu.addAction(free_listening_action)
+
+        self.menu.addSeparator()
+
         transcript_action = QAction("Show Transcript Text", self.menu, checkable=True)
-        transcript_action.setChecked(get_show_transcript())
-        transcript_action.triggered.connect(lambda checked: set_show_transcript(checked))
+        transcript_action.setChecked(prefs.get("show_transcript", True))
+        transcript_action.triggered.connect(lambda checked: set_pref("show_transcript", checked))
         self.menu.addAction(transcript_action)
 
         self.menu.addSeparator()
