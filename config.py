@@ -68,6 +68,10 @@ MAX_HISTORY_TURNS = 15  # ~15 back-and-forth exchanges, fits comfortably in 8192
 WAKE_WORD_VARIANTS = ["aria", "area", "are ya", "ares", "arya", "asia", "ari", "ariah", "arriya"]
 WAKE_WORD_MATCH_THRESHOLD = 0.7  # 0-1, similarity ratio required to count as a match
 
+# ---- System control config ----
+VOLUME_STEP = 10      # % to increase/decrease per "turn it up/down" command
+BRIGHTNESS_STEP = 10  # % to increase/decrease per brightness command
+
 # ---- HUD state broadcasting ----
 HUD_SERVER_PORT = 8765
 
