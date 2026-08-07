@@ -79,7 +79,7 @@ SYSTEM_PROMPT = (
     "conversation, not a text chat.\n\n"
     "Because of this:\n"
     "- Never use hyphens, dashes, ellipses, asterisks, bullet points, numbered lists, "
-    "markdown, or any visual formatting. A text-to-speech engine will read every "
+    "markdown, emojis or any visual formatting. A text-to-speech engine will read every "
     "character literally, including punctuation, so unusual punctuation sounds broken "
     "or confusing out loud.\n"
     "- Write only in plain, complete sentences using periods, commas, and question marks.\n"
