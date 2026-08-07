@@ -8,8 +8,11 @@ since openWakeWord has no pretrained "ARIA" model and training a custom
 one is a bigger separate project.
 """
 import difflib
+import json
 import os
 import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 PIPER_BINARY = os.path.join(os.path.dirname(sys.executable), "piper")
 import re
@@ -70,6 +73,99 @@ PIPER_VOICE_MODEL = os.path.join(SCRIPT_DIR, "piper_voices", "en_US-lessac-mediu
 # Common ways Whisper might mishear "ARIA" - add more here if you notice new ones
 WAKE_WORD_VARIANTS = ["aria", "area", "are ya", "ares", "arya", "asia", "ari", "ariah", "arriya"]
 WAKE_WORD_MATCH_THRESHOLD = 0.7  # 0-1, similarity ratio required to count as a match
+
+# ---- HUD state broadcasting ----
+# A tiny local HTTP server that serves ARIA's current state as JSON, so a
+# separate HUD window (hud.py) can poll it and show live status/transcript
+# without being coupled to the voice pipeline itself.
+HUD_SERVER_PORT = 8765
+
+_hud_state = {
+    "state": "idle",        # idle | listening | thinking | speaking
+    "heard": "",
+    "reply": "",
+    "timestamp": time.time(),
+}
+_hud_state_lock = threading.Lock()
+
+# Separate from _hud_state since prefs are user-set toggles (persist across
+# turns until changed), not live pipeline status.
+_hud_prefs = {
+    "show_transcript": True,
+}
+_hud_prefs_lock = threading.Lock()
+
+
+def set_hud_state(**kwargs):
+    with _hud_state_lock:
+        _hud_state.update(kwargs)
+        _hud_state["timestamp"] = time.time()
+
+
+class _HudStateHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/state":
+            with _hud_state_lock:
+                body = json.dumps(_hud_state).encode("utf-8")
+        elif self.path == "/prefs":
+            with _hud_prefs_lock:
+                body = json.dumps(_hud_prefs).encode("utf-8")
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")  # HUD window fetches cross-origin
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path != "/prefs":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(content_length)
+        try:
+            updates = json.loads(raw_body)
+        except Exception:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        with _hud_prefs_lock:
+            _hud_prefs.update(updates)
+            body = json.dumps(_hud_prefs).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        # Needed for CORS preflight requests from the HUD/tray's fetch() POST calls
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # silence default request logging, it's noisy
+
+
+def start_hud_server():
+    server = HTTPServer(("127.0.0.1", HUD_SERVER_PORT), _HudStateHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[HUD state server running on http://127.0.0.1:{HUD_SERVER_PORT}/state]")
+
 
 SYSTEM_PROMPT = (
     "You are ARIA (short for Adaptive & Responsive Intelligence Agent), a voice assistant. "
@@ -269,46 +365,34 @@ def speak(text: str):
     sd.wait()
 
 
-def notify(title: str, message: str, urgency: str = "normal"):
-    """
-    Shows a desktop notification popup so you have live visual feedback of
-    what ARIA heard, without needing to keep a terminal/journalctl open.
-    Fails silently if notify-send isn't available or no display is attached,
-    so it never breaks the actual voice pipeline.
-    """
-    try:
-        subprocess.run(
-            ["notify-send", "-u", urgency, "-a", "ARIA", title, message],
-            timeout=2,
-            check=False,
-        )
-    except Exception:
-        pass  # notifications are a nice-to-have, never let this crash the loop
-
-
 def run_turn():
+    set_hud_state(state="listening")
     t0 = time.time()
     got_speech = record_with_vad()
 
     if not got_speech:
         print("(Heard nothing, listening again.)")
+        set_hud_state(state="idle")
         return
 
+    set_hud_state(state="thinking")
     t1 = time.time()
     user_text = transcribe_audio()
     print(f"Heard: \"{user_text}\"  ({time.time() - t1:.2f}s)")
 
     if not user_text.strip():
         print("(Transcription empty, listening again.)")
+        set_hud_state(state="idle")
         return
 
-    # Always show what was heard, even if it's not for ARIA - this is the
-    # main "am I even being picked up correctly" feedback loop.
-    notify("ARIA heard", user_text)
+    # Always broadcast what was heard to the HUD, even if it's not for ARIA -
+    # this is the main "am I even being picked up correctly" feedback loop.
+    set_hud_state(heard=user_text)
 
     wake_idx = find_wake_word_index(user_text)
     if wake_idx is None:
         print("(No wake word detected, ignoring.)")
+        set_hud_state(state="idle")
         return
 
     words = user_text.strip().split()
@@ -316,6 +400,7 @@ def run_turn():
 
     if not command_text:
         print("(Heard only the wake word, nothing to act on. Listening again.)")
+        set_hud_state(state="idle")
         return
 
     print(f"Command: \"{command_text}\"")
@@ -323,15 +408,17 @@ def run_turn():
     t2 = time.time()
     reply = ask_llm(command_text)
     print(f"ARIA: \"{reply}\"  ({time.time() - t2:.2f}s)")
-    notify("ARIA replied", reply)
+    set_hud_state(state="speaking", reply=reply)
 
     t3 = time.time()
     speak(reply)
     print(f"(spoke in {time.time() - t3:.2f}s, total turn: {time.time() - t0:.2f}s)")
+    set_hud_state(state="idle")
 
 
 if __name__ == "__main__":
     print("ARIA is ready. Say \"ARIA\" followed by your request. Ctrl+C to quit.")
+    start_hud_server()
     try:
         while True:
             run_turn()
